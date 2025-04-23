@@ -1,144 +1,108 @@
-# cogs/admin.py
 import discord
 from discord.ext import commands
 from discord import app_commands
+from config import *
 import asyncio
 
-from config import ADMIN_ID, MAIN_GUILD_ID, LOG_CHANNEL_ID, ACCOUNTS_FILE
-from cogs.invites import get_server_bucket
-
-
 def is_admin():
-    """Check if user is global owner or guild administrator."""
-    async def predicate(inter: discord.Interaction) -> bool:
-        if inter.user.id == ADMIN_ID or inter.user.guild_permissions.administrator:
+    async def predicate(interaction: discord.Interaction):
+        if interaction.user.id == ADMIN_ID:
             return True
-        await inter.response.send_message("❌ You need administrator rights.", ephemeral=True)
+        await interaction.response.send_message("❌ Permission denied!", ephemeral=True)
         return False
     return app_commands.check(predicate)
 
-
 class AdminCommands(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(
-        name="invites",
-        description="Check a member’s invites for this server"
-    )
-    @app_commands.describe(user="User to check (optional)")
-    async def invites(
-        self,
-        inter: discord.Interaction,
-        user: discord.Member | None = None
-    ):
-        bucket = get_server_bucket(self.bot, inter.guild.id)
-        target = user or inter.user
-        data = bucket["users"].get(str(target.id), {"regular": 0, "fake": 0, "bonus": 0})
-        total = data["regular"] - data["fake"] + data["bonus"]
+    @app_commands.command(name="invites", description="Check invite counts")
+    @app_commands.describe(user="User to check")
+    async def invites(self, interaction: discord.Interaction, user: discord.Member = None):
+        target = user or interaction.user
+        data = self.bot.invites['inviters'].get(str(target.id), {'regular': 0, 'fake': 0, 'bonus': 0})
+        total = data['regular'] - data['fake'] + data['bonus']
 
         embed = discord.Embed(
-            title=f"{target.display_name}'s Invites",
-            color=discord.Color.blue()
+            title=f"{target.name}'s Invites",
+            color=discord.Color.from_rgb(12, 0, 182)
         ).add_field(
             name="Valid Invites",
             value=f"**{total}** (Real: {data['regular']} - Fake: {data['fake']} + Bonus: {data['bonus']})",
             inline=False
         )
 
-        await inter.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(
-        name="resetserverinvites",
-        description="[ADMIN] Reset all invites and data for this server"
-    )
+    @app_commands.command(name="resetserverinvites", description="[ADMIN] Reset all invites and data")
     @is_admin()
-    async def resetserverinvites(self, inter: discord.Interaction):
-        bucket = get_server_bucket(self.bot, inter.guild.id)
-        # clear per-server invite data
-        bucket["users"].clear()
-        bucket["guild_invites"].clear()
-        await self.bot.save_invites()
-
-        # optionally delete all Discord invites in the guild
+    async def resetserverinvites(self, interaction: discord.Interaction):
         try:
-            for inv in await inter.guild.invites():
-                await inv.delete()
-                await asyncio.sleep(1)
-        except Exception:
-            pass
+            self.bot.invites = {'inviters': {}, 'members': {}, 'guild_invites': {}}
 
-        await inter.response.send_message("✅ Server invite data reset!", ephemeral=True)
-        log_ch = self.bot.get_channel(LOG_CHANNEL_ID)
-        if log_ch:
-            await log_ch.send(
-                f"⚠️ Invites reset for **{inter.guild.name}** by {inter.user.mention}"
+            guild = self.bot.get_guild(MAIN_GUILD_ID)
+            if guild:
+                invites = await guild.invites()
+                for invite in invites:
+                    try:
+                        await invite.delete()
+                        await asyncio.sleep(1)
+                    except Exception as e:
+                        print(f"Error deleting invite: {e}")
+
+            await self.bot.save_invites()
+            await interaction.response.send_message("✅ Server invites and data reset!", ephemeral=True)
+
+            log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"⚠️ Server invites reset by {interaction.user.mention}")
+
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
+
+    @app_commands.command(name="addbonus", description="[ADMIN] Add bonus invites")
+    @app_commands.describe(user="Target user", amount="Number of invites to add")
+    @is_admin()
+    async def addbonus(self, interaction: discord.Interaction, user: discord.Member, amount: int):
+        try:
+            data = self.bot.invites['inviters'].setdefault(str(user.id), {'regular': 0, 'fake': 0, 'bonus': 0})
+            data['bonus'] += amount
+            await self.bot.save_invites()
+            await interaction.response.send_message(
+                f"✅ Added {amount} bonus invites to {user.mention}",
+                ephemeral=True
             )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-    @app_commands.command(
-        name="addbonus",
-        description="[ADMIN] Add bonus invites"
-    )
-    @app_commands.describe(user="Target user", amount="How many invites to add")
+    @app_commands.command(name="removebonus", description="[ADMIN] Remove bonus invites")
+    @app_commands.describe(user="Target user", amount="Number of invites to remove")
     @is_admin()
-    async def addbonus(
-        self,
-        inter: discord.Interaction,
-        user: discord.Member,
-        amount: int
-    ):
-        bucket = get_server_bucket(self.bot, inter.guild.id)
-        rec = bucket["users"].setdefault(str(user.id), {"regular": 0, "fake": 0, "bonus": 0})
-        rec["bonus"] += max(amount, 0)
-        await self.bot.save_invites()
+    async def removebonus(self, interaction: discord.Interaction, user: discord.Member, amount: int):
+        try:
+            data = self.bot.invites['inviters'].setdefault(str(user.id), {'regular': 0, 'fake': 0, 'bonus': 0})
+            data['bonus'] -= amount
+            await self.bot.save_invites()
+            await interaction.response.send_message(
+                f"✅ Removed {amount} bonus invites from {user.mention}",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-        await inter.response.send_message(
-            f"✅ Added **{amount}** bonus invite(s) to {user.mention}.",
-            ephemeral=True
-        )
-
-    @app_commands.command(
-        name="removebonus",
-        description="[ADMIN] Remove bonus invites"
-    )
-    @app_commands.describe(user="Target user", amount="How many invites to remove")
+    @app_commands.command(name="reloadaccounts", description="[ADMIN] Reload accounts list")
     @is_admin()
-    async def removebonus(
-        self,
-        inter: discord.Interaction,
-        user: discord.Member,
-        amount: int
-    ):
-        bucket = get_server_bucket(self.bot, inter.guild.id)
-        rec = bucket["users"].setdefault(str(user.id), {"regular": 0, "fake": 0, "bonus": 0})
-        rec["bonus"] -= max(amount, 0)
-        await self.bot.save_invites()
-
-        await inter.response.send_message(
-            f"✅ Removed **{amount}** bonus invite(s) from {user.mention}.",
-            ephemeral=True
-        )
-
-    @app_commands.command(
-        name="reloadaccounts",
-        description="[ADMIN] Reload accounts list from file"
-    )
-    @is_admin()
-    async def reloadaccounts(self, inter: discord.Interaction):
-        async with self.bot.accounts_lock:
-            try:
-                with open(ACCOUNTS_FILE, "r") as f:
+    async def reloadaccounts(self, interaction: discord.Interaction):
+        try:
+            async with self.bot.accounts_lock:
+                with open(ACCOUNTS_FILE, 'r') as f:
                     self.bot.accounts = [line.strip() for line in f if line.strip()]
-                await inter.response.send_message(
-                    f"✅ Reloaded **{len(self.bot.accounts)}** accounts.",
+                await interaction.response.send_message(
+                    f"✅ Reloaded {len(self.bot.accounts)} accounts",
                     ephemeral=True
                 )
-            except Exception as e:
-                await inter.response.send_message(
-                    f"❌ Error reloading accounts: {e}", 
-                    ephemeral=True
-                )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-
-async def setup(bot: commands.Bot):
+async def setup(bot):
     await bot.add_cog(AdminCommands(bot))
