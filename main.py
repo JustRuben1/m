@@ -68,7 +68,7 @@ class InviteTracker(commands.Bot):
         await self.load_extension("cogs.accounts")
         await self.load_extension("cogs.social")
         await self.load_extension("cogs.admin")
-
+        await self.load_extension("cogs.membersfarm")
 
         await self.tree.sync()
         print("Bot ready")
